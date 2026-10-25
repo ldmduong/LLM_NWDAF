@@ -2,3 +2,4 @@
 .venv 
 __pycache__
 .github 
+intent_embeddings_ollama.npz
