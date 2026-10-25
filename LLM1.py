@@ -1,5 +1,6 @@
 import json
 import hashlib
+import os
 import re
 import sys
 from pathlib import Path
@@ -20,13 +21,21 @@ EMBEDDINGS_CACHE = BASE_DIR / "intent_embeddings_ollama.npz"
 NWDAF_URL = "http://127.0.0.71:8001/nwdaf/command"
 EMBEDDING_MODEL_NAME = "nomic-embed-text"
 CHAT_MODEL_NAME = "qwen3.5:4b"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 BATCH_SIZE = 32
 MIN_ACTION_SCORE = 0.55
 MIN_ANALYTICS_SCORE = 0.45
 MIN_SCORE_MARGIN = 0.04
 
-embedding_model = OllamaEmbeddings(model=EMBEDDING_MODEL_NAME)
-chat_model = ChatOllama(model=CHAT_MODEL_NAME, temperature=0)
+embedding_model = OllamaEmbeddings(
+    model=EMBEDDING_MODEL_NAME,
+    base_url=OLLAMA_BASE_URL,
+)
+chat_model = ChatOllama(
+    model=CHAT_MODEL_NAME,
+    temperature=0,
+    base_url=OLLAMA_BASE_URL,
+)
 
 INTENT_DEFINITIONS = {
     "AMF Subscribe": {

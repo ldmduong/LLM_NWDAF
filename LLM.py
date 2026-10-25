@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sys
 from typing import Literal, TypedDict
@@ -12,6 +13,7 @@ from prom_query import query_prometheus
 
 
 CHAT_MODEL_NAME = "qwen3.5:4b"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 NWDAF_URL = "http://127.0.0.71:8001/nwdaf/command"
 PROMETHEUS_METRICS = {
     "active_UEs",
@@ -35,7 +37,11 @@ MULTI_REQUEST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-chat_model = ChatOllama(model=CHAT_MODEL_NAME, temperature=0)
+chat_model = ChatOllama(
+    model=CHAT_MODEL_NAME,
+    temperature=0,
+    base_url=OLLAMA_BASE_URL,
+)
 
 
 class IntentDecision(BaseModel):
