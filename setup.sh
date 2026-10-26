@@ -1,16 +1,30 @@
 #!/bin/bash
 
-set -e  # Exit script if any command fails
+set -euo pipefail
+
+if [[ -r /etc/os-release ]]; then
+    . /etc/os-release
+    if [[ "${ID:-}" != "ubuntu" || "${VERSION_ID:-}" != "22.04" ]]; then
+        echo "This installer targets Ubuntu 22.04; detected ${PRETTY_NAME:-unknown OS}." >&2
+        exit 1
+    fi
+fi
 
 echo "🚀 Starting setup..."
-sudo apt install git
-sudo apt install wget
+sudo apt-get update
+sudo apt-get install -y git wget gnupg curl gcc g++ cmake autoconf libtool pkg-config libmnl-dev libyaml-dev make libsctp-dev lksctp-tools iproute2 python3 python3-pip python3-venv
 
-# Clone testbed repository
-cd ~
-echo "📥 Cloning testbed repository..."
-git clone https://github.com/HenokDanielbfg/testbed.git
-cd testbed
+# Use the checkout that contains this installer so setup.sh installs the
+# current branch. Clone only when this script is run outside a testbed checkout.
+TESTBED_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -f "$TESTBED_DIR/requirements.txt" || ! -d "$TESTBED_DIR/free5gc" ]]; then
+    TESTBED_DIR="$HOME/testbed"
+    if [[ ! -d "$TESTBED_DIR/.git" ]]; then
+        echo "📥 Cloning testbed repository..."
+        git clone https://github.com/HenokDanielbfg/testbed.git "$TESTBED_DIR"
+    fi
+fi
+cd "$TESTBED_DIR"
 
 # Install Go
 echo "📦 Installing Go..."
@@ -24,19 +38,18 @@ echo 'export GOPATH=$HOME/go' >> ~/.bashrc
 echo 'export GOROOT=/usr/local/go' >> ~/.bashrc
 echo 'export PATH=$PATH:$GOPATH/bin:$GOROOT/bin' >> ~/.bashrc
 echo 'export GO111MODULE=auto' >> ~/.bashrc
-source ~/.bashrc
+export GOPATH="$HOME/go"
+export GOROOT=/usr/local/go
+export PATH="$PATH:$GOPATH/bin:$GOROOT/bin"
 
 # Install dependencies
 echo "📦 Installing dependencies..."
-sudo apt -y update
-sudo apt -y install wget git gnupg curl gcc g++ cmake autoconf libtool pkg-config libmnl-dev libyaml-dev
-sudo apt -y install make libsctp-dev lksctp-tools iproute2
-sudo snap install cmake --classic  # Ensure version > 3.17.0
+sudo apt-get -y install zlib1g-dev libcurl4-openssl-dev
 
 # Install MongoDB
 echo "📦 Installing MongoDB..."
 curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
-echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
 sudo apt update
 sudo apt install -y mongodb-org
 
@@ -52,15 +65,21 @@ sudo apt update
 sudo apt install -y nodejs
 sudo corepack enable  # Enable Yarn
 
+# Install the Python RAG/LLM dependencies in an isolated environment.
+cd "$TESTBED_DIR"
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+deactivate
+
 # Install Prometheus C++ library
 echo "📦 Installing Prometheus C++ library..."
-cd ~/testbed
+cd "$TESTBED_DIR"
 git clone https://github.com/jupp0r/prometheus-cpp.git
 cd prometheus-cpp
 git submodule init
 git submodule update
-sudo apt install zlib1g-dev
-sudo apt install libcurl4-openssl-dev
 mkdir _build
 cd _build
 sudo cmake .. -DBUILD_SHARED_LIBS=ON
@@ -69,30 +88,19 @@ sudo cmake --install .
 
 # Install Prometheus
 echo "📦 Installing Prometheus..."
-cd ~/testbed
+cd "$TESTBED_DIR"
 sudo wget https://github.com/prometheus/prometheus/releases/download/v2.41.0/prometheus-2.41.0.linux-amd64.tar.gz
 sudo tar -xvf prometheus-2.41.0.linux-amd64.tar.gz
 
-# Reminder for manual Free5GC modification
-echo "⚠️ MANUAL STEP REQUIRED:"
-echo "Open testbed/go/pkg/mod/github.com/free5gc/openapi@v1.0.8/models/model_smf_event.go"
-echo "Add the following line to the const variables:"
-echo 'SmfEvent_PDU_SES_EST SmfEvent = "PDU_SES_EST"'
-echo "Press Enter after completing this step..."
-read -p ""
-
-
-
-sudo apt remove --purge cmake -y && sudo apt update && sudo apt install -y software-properties-common && sudo add-apt-repository -y ppa:kitware/ppa && sudo apt update && sudo apt install -y cmake && cmake --version
 # Install UERANSIM
 echo "🛠️ Installing UERANSIM..."
-cd ~/testbed/UERANSIM
+cd "$TESTBED_DIR/UERANSIM"
 # git checkout e4c492d
 sudo make  # Make sure Prometheus C++ is installed first
 
 # Install Free5GC
 echo "🛠️ Installing Free5GC..."
-cd ~/testbed
+cd "$TESTBED_DIR"
 cd free5gc
 # rmdir gtp5g
 sudo make

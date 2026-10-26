@@ -1,0 +1,9 @@
+langchain-ollama
+langgraph
+matplotlib
+numpy
+pandas
+prometheus-api-client
+pydantic
+requests
+scikit-learn

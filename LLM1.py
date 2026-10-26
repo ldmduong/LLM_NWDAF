@@ -13,6 +13,7 @@ from langgraph.graph import END, START, StateGraph
 from sklearn.metrics.pairwise import cosine_similarity
 
 from prom_query import query_prometheus
+from diagnostics import collect_registration_failure_evidence
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -91,6 +92,19 @@ INTENT_DEFINITIONS = {
         "metric": "amf_ue_registration_state",
         "contrast_examples": [],
     },
+    "Destination Visits": {
+        "description": "Truy vấn các lượt ghé điểm đến mô phỏng của UE.",
+        "required_parameters": ["metric"],
+        "tool": "query_prometheus",
+        "metric": "ue_destination_visits_total",
+        "contrast_examples": [],
+    },
+    "Registration Failure Diagnosis": {
+        "description": "Tìm bằng chứng có thời gian liên quan khi UE đăng ký thất bại.",
+        "required_parameters": [],
+        "tool": "diagnose_registration_failure",
+        "contrast_examples": [],
+    },
 }
 
 ALLOWED_NWDAF_COMMANDS = {
@@ -98,7 +112,11 @@ ALLOWED_NWDAF_COMMANDS = {
     for definition in INTENT_DEFINITIONS.values()
     if definition["tool"] == "nwdaf_subscription_command"
 }
-ALLOWED_TOOLS = {"nwdaf_subscription_command", "query_prometheus"}
+ALLOWED_TOOLS = {
+    "nwdaf_subscription_command",
+    "query_prometheus",
+    "diagnose_registration_failure",
+}
 
 NEGATION_PATTERN = re.compile(
     r"\b(?:don't|do not|never|not|no)\b|(?:không|đừng|chưa|chẳng)",
@@ -328,6 +346,9 @@ def route_intent(state: QueryState) -> QueryState:
             "target": target,
         }
 
+    if definition["tool"] == "diagnose_registration_failure":
+        return {"status": "ready", "diagnosis": True}
+
     if definition["tool"] != "query_prometheus" or "metric" not in definition:
         return {
             "status": "unsupported",
@@ -338,21 +359,56 @@ def route_intent(state: QueryState) -> QueryState:
 
 
 def execute_action(state: QueryState) -> QueryState:
-    if "action" in state:
-        result = nwdaf_subscription_command(state["action"], state["target"])
-    else:
-        result = query_prometheus(state["metric"])
+    try:
+        if state.get("diagnosis"):
+            result = collect_registration_failure_evidence()
+        elif "action" in state:
+            result = nwdaf_subscription_command(state["action"], state["target"])
+        else:
+            result = query_prometheus(state["metric"])
+    except Exception as exc:
+        result = {"status": "error", "error": str(exc)}
     return {"function_result": result}
 
 
 def interpret_result(state: QueryState) -> QueryState:
+    result = state["function_result"]
+    if isinstance(result, dict) and result.get("status") == "error":
+        return {
+            "answer": f"Backend không thể xử lý yêu cầu: {result.get('error', 'lỗi không xác định')}.",
+            "status": "error",
+        }
+    if isinstance(result, dict) and result.get("status") == "empty":
+        health = result.get("scrape_health", {}).get("status", "unknown")
+        return {
+            "answer": (
+                "Không có dữ liệu trong khoảng thời gian truy vấn. "
+                f"Tình trạng scrape Prometheus: {health}. Hãy kiểm tra target và khoảng thời gian."
+            ),
+            "status": "empty",
+        }
+    if isinstance(result, dict) and result.get("status") == "unverified":
+        return {
+            "answer": (
+                "Có dữ liệu Prometheus nhưng trạng thái scrape chưa được xác nhận; "
+                "mình chưa dùng dữ liệu này để kết luận. Hãy kiểm tra trạng thái targets."
+            ),
+            "status": "unverified",
+        }
     response = chat_model.invoke([
         (
             "system",
             "Bạn diễn giải kết quả phân tích mạng 5G bằng tiếng Việt. "
             "Chỉ kết luận từ dữ liệu backend được cung cấp. "
-            "Nếu dữ liệu rỗng, thiếu hoặc không đủ để kết luận, hãy nói rõ; "
-            "không tự suy đoán.",
+            "Dữ liệu có metadata nguồn, thời gian truy vấn và trạng thái scrape. "
+            "Nếu có thông tin vị trí hoặc điểm đến, đó là dữ liệu mô phỏng, "
+            "không phải tọa độ địa lý thực. "
+            "Với báo cáo chẩn đoán, chỉ tóm tắt bằng chứng, thành phần nghi vấn, "
+            "mức độ chắc chắn và bước kiểm tra tiếp theo từ dữ liệu cung cấp. "
+            "Không khẳng định nguyên nhân gốc; nếu bằng chứng thiếu hoặc mâu thuẫn, "
+            "hãy nói chưa đủ dữ liệu. "
+            "Nêu nguồn và thời gian khi có thể. Nếu dữ liệu thiếu hoặc không đủ "
+            "để kết luận, hãy nói rõ; không tự suy đoán.",
         ),
         (
             "human",

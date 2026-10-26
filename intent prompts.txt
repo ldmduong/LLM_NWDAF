@@ -1061,3 +1061,17 @@
 148. Show me all registration events with timestamps and durations side by side
 149. Which SUPI spent the highest percentage of time in active state?
 150. How many total registration state changes occurred in the dataset?
+
+## Destination Visits
+1. Show UE destination visit records.
+2. How many simulated visits were recorded for each destination?
+3. Show the visit pattern by destination type.
+4. Query UE destination visits from the network metrics.
+5. Which simulated destination has the most visit records?
+
+## Registration Failure Diagnosis
+1. Diagnose why a UE registration failed using the recent logs.
+2. Find evidence for the UE registration reject and summarize the next checks.
+3. Correlate AMF, NWDAF, and Prometheus evidence for a registration failure.
+4. Check recent UE registration errors across the testbed components.
+5. Investigate a failed UE registration without guessing the root cause.

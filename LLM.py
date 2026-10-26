@@ -155,20 +155,48 @@ def validate_and_route(state: ConversationState) -> ConversationState:
 
 def execute_tool(state: ConversationState) -> ConversationState:
     decision = state["decision"]
-    if decision.tool == "query_prometheus":
-        result = query_prometheus(decision.metric)
-    else:
-        result = nwdaf_subscription_command(decision.action, decision.target)
+    try:
+        if decision.tool == "query_prometheus":
+            result = query_prometheus(decision.metric)
+        else:
+            result = nwdaf_subscription_command(decision.action, decision.target)
+    except Exception as exc:
+        result = {"status": "error", "error": str(exc)}
     return {"function_result": result}
 
 
 def interpret_result(state: ConversationState) -> ConversationState:
+    result = state["function_result"]
+    if isinstance(result, dict) and result.get("status") == "error":
+        return {
+            "answer": f"Backend không thể xử lý yêu cầu: {result.get('error', 'lỗi không xác định')}.",
+            "status": "error",
+        }
+    if isinstance(result, dict) and result.get("status") == "empty":
+        health = result.get("scrape_health", {}).get("status", "unknown")
+        return {
+            "answer": (
+                "Không có dữ liệu trong khoảng thời gian truy vấn. "
+                f"Tình trạng scrape Prometheus: {health}. Hãy kiểm tra target và khoảng thời gian."
+            ),
+            "status": "empty",
+        }
+    if isinstance(result, dict) and result.get("status") == "unverified":
+        return {
+            "answer": (
+                "Có dữ liệu Prometheus nhưng trạng thái scrape chưa được xác nhận; "
+                "mình chưa dùng dữ liệu này để kết luận. Hãy kiểm tra trạng thái targets."
+            ),
+            "status": "unverified",
+        }
     response = generate_answer([
         (
             "system",
             "Bạn diễn giải kết quả analytics hoặc subscription 5G bằng tiếng Việt. "
             "Chỉ dựa trên dữ liệu backend được cung cấp. Nếu dữ liệu rỗng, thiếu "
-            "hoặc không đủ để kết luận, hãy nói rõ và không suy đoán.",
+            "hoặc không đủ để kết luận, hãy nói rõ và không suy đoán. Dữ liệu "
+            "có metadata nguồn, thời gian truy vấn và trạng thái scrape; hãy "
+            "nêu các metadata này khi có thể.",
         ),
         (
             "human",

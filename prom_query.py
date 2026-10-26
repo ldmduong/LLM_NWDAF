@@ -1,13 +1,13 @@
 # prometheus_query.py
 
-import ast
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 import pandas as pd
 import requests
 from prometheus_api_client import PrometheusConnect
 
-PROMETHEUS_URL = "http://localhost:9090"  # or wherever your Prometheus is hosted
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://127.0.0.1:9090")
+QUERY_WINDOW_MINUTES = int(os.getenv("PROMETHEUS_QUERY_WINDOW_MINUTES", "60"))
 prom = PrometheusConnect(url=PROMETHEUS_URL, disable_ssl=True)
 
 def extract_metric_name(promql):
@@ -28,10 +28,9 @@ def extract_metric_name(promql):
     # If no valid metric found
     raise ValueError(f"No valid metric name found in query: {promql}. Valid metrics are: {', '.join(valid_metrics)}")
 
-def query_prometheus(promql) -> list:
+def query_prometheus(promql, window_minutes: int | None = None) -> dict:
     """
-    Query Prometheus with a PromQL query string (range query) 
-    and return a list of records with the same structure as before.
+    Query an allowlisted metric over the configured recent time window.
     
     :param query: A valid PromQL query for range queries.
     :param start_time: The datetime object for the start of the query range.
@@ -45,20 +44,77 @@ def query_prometheus(promql) -> list:
     print(query)
 
     
-    end_time= datetime.now()
-    start_time= datetime(2025, 3, 3, 8, 30, 45)
-    # end_time= datetime(2025, 1, 24, 11, 30, 45)
-    # prom = PrometheusConnect(url=PROMETHEUS_URL, disable_ssl=True)
-
-
+    selected_window = QUERY_WINDOW_MINUTES if window_minutes is None else window_minutes
+    if selected_window < 1:
+        raise ValueError("window_minutes must be positive")
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(minutes=selected_window)
     if query == 'UE_location_report':
-        return get_df_location(start_time, end_time)
+        data = get_df_location(start_time, end_time)
     elif query == 'active_UEs':
-        return get_df_active(start_time, end_time)
+        data = get_df_active(start_time, end_time)
     elif query == 'amf_ue_registration_state':
-        return get_reg(start_time, end_time)
+        data = get_reg(start_time, end_time)
     elif query == 'ue_destination_visits_total':
-        return get_df_destination(start_time, end_time)
+        data = get_df_destination(start_time, end_time)
+    else:
+        raise ValueError(f"Unsupported Prometheus metric: {query}")
+
+    scrape_health = get_scrape_health(query)
+    data_status = "ok" if len(data) else "empty"
+    if data_status == "ok" and scrape_health["status"] != "up":
+        data_status = "unverified"
+    return {
+        "status": data_status,
+        "source": PROMETHEUS_URL,
+        "metric": query,
+        "queried_at": datetime.now(timezone.utc).isoformat(),
+        "range": {
+            "start": start_time.isoformat(),
+            "end": end_time.isoformat(),
+            "step": "5m",
+        },
+        "scrape_health": scrape_health,
+        "data": data,
+    }
+
+
+def get_scrape_health(metric: str | None = None) -> dict:
+    """Check the metric's exporter when known, and report every active target."""
+    try:
+        response = requests.get(
+            f"{PROMETHEUS_URL.rstrip('/')}/api/v1/targets",
+            params={"state": "active"},
+            timeout=5,
+        )
+        response.raise_for_status()
+        targets = response.json().get("data", {}).get("activeTargets", [])
+        target_rows = [
+            {
+                "job": t.get("labels", {}).get("job"),
+                "instance": t.get("labels", {}).get("instance"),
+                "scrape_url": t.get("scrapeUrl"),
+                "health": t.get("health"),
+                "last_error": t.get("lastError"),
+            }
+            for t in targets
+        ]
+        # These three metrics are exported by the NWDAF endpoint in this testbed.
+        # The destination visit exporter does not have a stable target in the
+        # checked-in Prometheus config, so its health cannot be asserted here.
+        if metric == "ue_destination_visits_total":
+            return {"status": "unknown", "targets": target_rows}
+        relevant = [
+            t for t in targets
+            if "127.0.0.71:8001" in str(t.get("scrapeUrl", ""))
+            or "127.0.0.71:8001" in str(t.get("labels", {}).get("instance", ""))
+        ]
+        return {
+            "status": "up" if relevant and all(t.get("health") == "up" for t in relevant) else "degraded",
+            "targets": target_rows,
+        }
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        return {"status": "unknown", "error": str(exc)}
 
 
 
@@ -164,6 +220,8 @@ def get_df_location(start_time=None, end_time=None):
     records = []
     for entry in metric_data:
         metric = entry['metric']
+        if not all(key in metric for key in ('time', 'NrCellId', 'supi', 'tac')):
+            continue
         # Extract only the desired labels
         record = {
             'time': metric['time'],
@@ -175,11 +233,14 @@ def get_df_location(start_time=None, end_time=None):
         records.append(record)
     
     # Convert to DataFrame
-    df = pd.DataFrame(records)
+    df = pd.DataFrame(records, columns=['time', 'NrCellId', 'supi', 'tac'])
+    if df.empty:
+        return []
 
     # Convert time string to datetime
     # Remove 'UTC' and trailing timezone info for clean parsing
-    df['time'] = df['time'].apply(lambda x: pd.to_datetime(x.split('+')[0].strip()))
+    df['time'] = pd.to_datetime(df['time'], utc=True, errors='coerce')
+    df = df.dropna(subset=['time'])
     # Sort by 'supi' and 'time'
     
     df = df.sort_values(by=['supi', 'time'])
@@ -194,13 +255,13 @@ def get_df_location(start_time=None, end_time=None):
     # df_location = df_location.reset_index(drop=True)
     # Sort by time
     df = df.sort_values('time')
-    df['time'] = df['time'] + pd.Timedelta(hours=4)
-    df['supi'] = df['supi'].str.extract(r'imsi-(\d+)').astype(str)
-    df['time'] = df['time'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    extracted_supi = df['supi'].str.extract(r'imsi-(\d+)')[0]
+    df['supi'] = extracted_supi.fillna(df['supi']).astype(str)
+    df['time'] = df['time'].dt.strftime('%Y-%m-%dT%H:%M:%SZ')
     # Reset index after sorting
     df = df.reset_index(drop=True)
     
-    return df.to_json()
+    return df.to_dict(orient='records')
 def get_df_destination(start_time=None, end_time=None):
     # Query Prometheus
     metric_data = prom.custom_query_range(
@@ -225,11 +286,14 @@ def get_df_destination(start_time=None, end_time=None):
         records.append(record)
     
     # Convert to DataFrame
-    df = pd.DataFrame(records)
+    df = pd.DataFrame(records, columns=['time', 'supi', 'location_type', 'duration', 'time_of_day'])
+    if df.empty:
+        return []
 
     # Convert time string to datetime
     # Remove 'UTC' and trailing timezone info for clean parsing
-    df['time'] = df['time'].apply(lambda x: pd.to_datetime(x.split('+')[0].strip()))
+    df['time'] = pd.to_datetime(df['time'], utc=True, errors='coerce')
+    df = df.dropna(subset=['time'])
 
 
     df = df.sort_values(by=['supi', 'time'])
@@ -241,11 +305,11 @@ def get_df_destination(start_time=None, end_time=None):
     
     # Sort by time
     df = df.sort_values('time')
-    df['time'] = df['time'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    df['time'] = df['time'].dt.strftime('%Y-%m-%dT%H:%M:%SZ')
     # Reset index after sorting
     df = df.reset_index(drop=True)
     
-    return df.to_json()
+    return df.to_dict(orient='records')
 
 
 def get_df_active(start_time=None, end_time=None):
@@ -276,13 +340,12 @@ def get_df_active(start_time=None, end_time=None):
         df = df[df['active_UEs'].shift() != df['active_UEs']]
         df['duration'] = (df['timestamp'].shift(-1) - df['timestamp']).fillna(pd.Timedelta(seconds=0))
 
-        df['timestamp'] = df['timestamp'] + pd.Timedelta(hours=4)
-        df['timestamp'] = df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        df['timestamp'] = df['timestamp'].dt.strftime('%Y-%m-%dT%H:%M:%SZ')
         # Reset index after sorting
         df = df.reset_index(drop=True)
-        return df.to_json()
+        return df.to_dict(orient='records')
     else:
-        return pd.DataFrame(columns=['timestamp', 'active_UEs']).to_json()
+        return []
 
 def get_reg(start_time=None, end_time=None):
     
@@ -336,14 +399,13 @@ def get_reg(start_time=None, end_time=None):
             final_df.groupby('supi')['timestamp'].diff().shift(-1).dt.total_seconds() / 60
         )
         final_df = final_df.sort_values(by='timestamp')
-        final_df['timestamp'] = final_df['timestamp'] + pd.Timedelta(hours=4)
-        final_df['timestamp'] = final_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        final_df['timestamp'] = final_df['timestamp'].dt.strftime('%Y-%m-%dT%H:%M:%SZ')
         # final_df['timestamp'] = final_df['timestamp'].astype(str)
         # Reset index after sorting
         final_df = final_df.reset_index(drop=True)        
-        return final_df.to_json()
+        return final_df.to_dict(orient='records')
     else:
-        return pd.DataFrame(columns=['timestamp', 'supi', 'state', 'state_desc', 'duration_minutes']).to_json()
+        return []
 
 
 if __name__ == "__main__":
